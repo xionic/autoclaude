@@ -36,15 +36,4 @@ changelog:
       - "^docs:"
       - "^test:"
 
-brews:
-  - repository:
-      owner: henryaj
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: "https://github.com/henryaj/autoclaude"
-    description: "Automatically resume Claude Code sessions after rate limits"
-    license: "MIT"
-    install: |
-      bin.install "autoclaude"
-    test: |
-      system "#{bin}/autoclaude", "-version"
+# Homebrew formula is managed manually in henryaj/homebrew-tap
