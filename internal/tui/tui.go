@@ -138,6 +138,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.moveSelection(tmux.DirDown)
 		case "tab":
 			m.cycleMode()
+		case "a":
+			m.enableAll()
+		case "n":
+			m.disableAll()
+		case "r":
+			m.pollPanes()
+			return m, fetchLayoutCmd(m.ownWindowID)
 		}
 
 	case tea.WindowSizeMsg:
@@ -296,6 +303,28 @@ func (m *Model) cycleMode() {
 	}
 }
 
+func (m *Model) enableAll() {
+	if m.layout == nil {
+		return
+	}
+	for _, pane := range m.layout.Panes {
+		if pane.HasClaudeCode {
+			pane.Mode = tmux.ModeContinueOnRateLimit
+		}
+	}
+}
+
+func (m *Model) disableAll() {
+	if m.layout == nil {
+		return
+	}
+	for _, pane := range m.layout.Panes {
+		if pane.HasClaudeCode {
+			pane.Mode = tmux.ModeOff
+		}
+	}
+}
+
 func (m Model) View() string {
 	// Header with title and version
 	title := titleStyle.Render("autoclaude")
@@ -365,7 +394,7 @@ func (m Model) View() string {
 		}
 	}
 
-	helpText := dimTextStyle.Render("←↑↓→ navigate • tab toggle • q quit")
+	helpText := dimTextStyle.Render("←↑↓→ nav • tab toggle • a on • n off • r refresh • q quit")
 
 	// Calculate spacing to right-align help text
 	statusLen := lipgloss.Width(statusText)
