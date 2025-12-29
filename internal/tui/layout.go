@@ -3,7 +3,15 @@ package tui
 import (
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/henryaj/autoclaude/internal/tmux"
+)
+
+// Colors for pane rendering
+var (
+	claudeOrange    = lipgloss.Color("#e07c3e") // Claude Code orange
+	selectedColor   = lipgloss.Color("#00d7ff") // Cyan for selected
+	unselectedColor = lipgloss.Color("#4a4a4a") // Dark gray for unselected
 )
 
 // Box drawing characters
@@ -25,7 +33,7 @@ const (
 	doubleVertical    = "║"
 )
 
-// renderLayout renders the tmux pane layout as ASCII art
+// renderLayout renders the tmux pane layout as ASCII art with colors
 func renderLayout(layout *tmux.Layout, selectedID string, width, height int) string {
 	if layout == nil || len(layout.Panes) == 0 {
 		return ""
@@ -48,12 +56,12 @@ func renderLayout(layout *tmux.Layout, selectedID string, width, height int) str
 		return ""
 	}
 
-	// Create a 2D grid for rendering
-	grid := make([][]rune, height)
+	// Create a 2D grid for rendering (stores styled strings per cell)
+	grid := make([][]string, height)
 	for i := range grid {
-		grid[i] = make([]rune, width)
+		grid[i] = make([]string, width)
 		for j := range grid[i] {
-			grid[i][j] = ' '
+			grid[i][j] = " "
 		}
 	}
 
@@ -70,7 +78,9 @@ func renderLayout(layout *tmux.Layout, selectedID string, width, height int) str
 	// Convert grid to string
 	var sb strings.Builder
 	for i, row := range grid {
-		sb.WriteString(string(row))
+		for _, cell := range row {
+			sb.WriteString(cell)
+		}
 		if i < len(grid)-1 {
 			sb.WriteRune('\n')
 		}
@@ -79,8 +89,8 @@ func renderLayout(layout *tmux.Layout, selectedID string, width, height int) str
 	return sb.String()
 }
 
-// drawPane draws a single pane on the grid
-func drawPane(grid [][]rune, p *tmux.Pane, selected bool, scaleX, scaleY float64, gridW, gridH int) {
+// drawPane draws a single pane on the grid with appropriate styling
+func drawPane(grid [][]string, p *tmux.Pane, selected bool, scaleX, scaleY float64, gridW, gridH int) {
 	// Calculate scaled coordinates
 	x1 := int(float64(p.Left) * scaleX)
 	y1 := int(float64(p.Top) * scaleY)
@@ -109,6 +119,27 @@ func drawPane(grid [][]rune, p *tmux.Pane, selected bool, scaleX, scaleY float64
 		y2 = gridH - 1
 	}
 
+	// Determine colors based on state
+	var borderColor, labelColor lipgloss.Color
+	if p.HasClaudeCode {
+		borderColor = claudeOrange
+		labelColor = claudeOrange
+	} else if selected {
+		borderColor = selectedColor
+		labelColor = selectedColor
+	} else {
+		borderColor = unselectedColor
+		labelColor = unselectedColor
+	}
+
+	// Override border color if selected
+	if selected {
+		borderColor = selectedColor
+	}
+
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+	labelStyle := lipgloss.NewStyle().Foreground(labelColor)
+
 	// Choose box characters
 	var tl, tr, bl, br, h, v string
 	if selected {
@@ -118,40 +149,81 @@ func drawPane(grid [][]rune, p *tmux.Pane, selected bool, scaleX, scaleY float64
 	}
 
 	// Draw corners
-	setCell(grid, x1, y1, []rune(tl)[0])
-	setCell(grid, x2, y1, []rune(tr)[0])
-	setCell(grid, x1, y2, []rune(bl)[0])
-	setCell(grid, x2, y2, []rune(br)[0])
+	setCell(grid, x1, y1, borderStyle.Render(tl))
+	setCell(grid, x2, y1, borderStyle.Render(tr))
+	setCell(grid, x1, y2, borderStyle.Render(bl))
+	setCell(grid, x2, y2, borderStyle.Render(br))
 
 	// Draw horizontal lines
-	hRune := []rune(h)[0]
+	styledH := borderStyle.Render(h)
 	for x := x1 + 1; x < x2; x++ {
-		setCell(grid, x, y1, hRune)
-		setCell(grid, x, y2, hRune)
+		setCell(grid, x, y1, styledH)
+		setCell(grid, x, y2, styledH)
 	}
 
 	// Draw vertical lines
-	vRune := []rune(v)[0]
+	styledV := borderStyle.Render(v)
 	for y := y1 + 1; y < y2; y++ {
-		setCell(grid, x1, y, vRune)
-		setCell(grid, x2, y, vRune)
+		setCell(grid, x1, y, styledV)
+		setCell(grid, x2, y, styledV)
 	}
 
-	// Draw mode label centered in the pane
-	label := p.Mode.String()
-	labelX := x1 + (x2-x1-len(label))/2
-	labelY := y1 + (y2-y1)/2
+	// Draw labels centered in the pane
+	centerY := y1 + (y2-y1)/2
+	paneWidth := x2 - x1 - 2 // Available width inside borders
 
-	if labelX > x1 && labelX+len(label) < x2 && labelY > y1 && labelY < y2 {
-		for i, r := range label {
-			setCell(grid, labelX+i, labelY, r)
+	if p.HasClaudeCode {
+		// CC panes: show mode on center line, command below
+		modeLabel := p.Mode.String()
+		drawCenteredText(grid, modeLabel, x1, x2, centerY, labelStyle)
+
+		// Show command name below if there's room
+		if centerY+1 < y2 && p.Command != "" {
+			cmdStyle := lipgloss.NewStyle().Foreground(labelColor).Italic(true)
+			cmd := truncate(p.Command, paneWidth)
+			drawCenteredText(grid, cmd, x1, x2, centerY+1, cmdStyle)
+		}
+	} else {
+		// Non-CC panes: just show command name in italics
+		if p.Command != "" {
+			cmdStyle := lipgloss.NewStyle().Foreground(labelColor).Italic(true)
+			cmd := truncate(p.Command, paneWidth)
+			drawCenteredText(grid, cmd, x1, x2, centerY, cmdStyle)
 		}
 	}
 }
 
+// drawCenteredText draws text centered horizontally between x1 and x2
+func drawCenteredText(grid [][]string, text string, x1, x2, y int, style lipgloss.Style) {
+	textRunes := []rune(text)
+	textLen := len(textRunes)
+	labelX := x1 + (x2-x1-textLen)/2
+
+	if labelX > x1 && labelX+textLen < x2 && y >= 0 && y < len(grid) {
+		for i, r := range textRunes {
+			setCell(grid, labelX+i, y, style.Render(string(r)))
+		}
+	}
+}
+
+// truncate shortens a string to fit within maxLen
+func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return string(runes[:maxLen])
+	}
+	return string(runes[:maxLen-1]) + "…"
+}
+
 // setCell safely sets a cell in the grid
-func setCell(grid [][]rune, x, y int, r rune) {
+func setCell(grid [][]string, x, y int, s string) {
 	if y >= 0 && y < len(grid) && x >= 0 && x < len(grid[y]) {
-		grid[y][x] = r
+		grid[y][x] = s
 	}
 }

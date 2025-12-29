@@ -2,11 +2,15 @@ package tui
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/henryaj/autoclaude/internal/detection"
 	"github.com/henryaj/autoclaude/internal/tmux"
 )
+
+const pollInterval = 10 * time.Second
 
 // Colors - subtle cyan/gray palette
 var (
@@ -48,12 +52,21 @@ type layoutUpdateMsg struct {
 	err    error
 }
 
+type pollTickMsg time.Time
+
+type initMsg struct {
+	ownPaneID string
+	layout    *tmux.Layout
+	err       error
+}
+
 type Model struct {
 	version        string
 	width          int
 	height         int
 	layout         *tmux.Layout
 	selectedPaneID string
+	ownPaneID      string // The pane running autoclaude (excluded from detection)
 	err            error
 }
 
@@ -66,7 +79,27 @@ func New(version string) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return fetchLayout
+	return doInit
+}
+
+func doInit() tea.Msg {
+	ownPaneID, err := tmux.CurrentPaneID()
+	if err != nil {
+		return initMsg{err: err}
+	}
+
+	layout, err := tmux.ListPanes()
+	if err != nil {
+		return initMsg{ownPaneID: ownPaneID, err: err}
+	}
+
+	return initMsg{ownPaneID: ownPaneID, layout: layout}
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(pollInterval, func(t time.Time) tea.Msg {
+		return pollTickMsg(t)
+	})
 }
 
 func fetchLayout() tea.Msg {
@@ -96,23 +129,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
+	case initMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.ownPaneID = msg.ownPaneID
+		m.updateLayout(msg.layout)
+		m.pollPanes() // Poll immediately
+		return m, tickCmd()
+
 	case layoutUpdateMsg:
 		if msg.err != nil {
 			m.err = msg.err
 		} else {
 			m.updateLayout(msg.layout)
 		}
+
+	case pollTickMsg:
+		m.pollPanes()
+		return m, tea.Batch(fetchLayout, tickCmd())
 	}
 
 	return m, nil
 }
 
+func (m *Model) pollPanes() {
+	if m.layout == nil {
+		return
+	}
+
+	for _, pane := range m.layout.Panes {
+		// Skip our own pane
+		if pane.ID == m.ownPaneID {
+			pane.HasClaudeCode = false
+			continue
+		}
+
+		content, err := tmux.CapturePane(pane.ID)
+		if err != nil {
+			continue
+		}
+		pane.HasClaudeCode = detection.IsClaudeCode(content)
+	}
+}
+
 func (m *Model) updateLayout(layout *tmux.Layout) {
-	// Preserve modes from old layout
+	// Preserve state from old layout
 	if m.layout != nil && layout != nil {
 		for _, newPane := range layout.Panes {
 			if oldPane := m.layout.PaneByID(newPane.ID); oldPane != nil {
 				newPane.Mode = oldPane.Mode
+				newPane.HasClaudeCode = oldPane.HasClaudeCode
 			}
 		}
 	}
@@ -153,6 +221,11 @@ func (m *Model) cycleMode() {
 
 	pane := m.layout.PaneByID(m.selectedPaneID)
 	if pane == nil {
+		return
+	}
+
+	// Only allow mode changes on Claude Code panes
+	if !pane.HasClaudeCode {
 		return
 	}
 

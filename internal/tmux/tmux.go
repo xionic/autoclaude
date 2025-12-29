@@ -26,13 +26,30 @@ func CheckTmuxEnv() error {
 	return nil
 }
 
+// CurrentPaneID returns the ID of the pane where this process is running
+func CurrentPaneID() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", ErrTimeout
+		}
+		return "", fmt.Errorf("tmux display-message: %w", err)
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
 // ListPanes returns the current layout of panes in the active window
 func ListPanes() (*Layout, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	// Format: pane_id pane_left pane_top pane_width pane_height
-	cmd := exec.CommandContext(ctx, "tmux", "list-panes", "-F", "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}")
+	// Format: pane_id pane_left pane_top pane_width pane_height pane_current_command
+	cmd := exec.CommandContext(ctx, "tmux", "list-panes", "-F", "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_current_command}")
 	output, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -70,8 +87,8 @@ func parseListPanes(output string) (*Layout, error) {
 // parsePaneLine parses a single line of tmux list-panes output
 func parsePaneLine(line string) (*Pane, error) {
 	fields := strings.Fields(line)
-	if len(fields) != 5 {
-		return nil, fmt.Errorf("expected 5 fields, got %d", len(fields))
+	if len(fields) < 5 {
+		return nil, fmt.Errorf("expected at least 5 fields, got %d", len(fields))
 	}
 
 	left, err := strconv.Atoi(fields[1])
@@ -94,13 +111,19 @@ func parsePaneLine(line string) (*Pane, error) {
 		return nil, fmt.Errorf("parse height: %w", err)
 	}
 
+	command := ""
+	if len(fields) >= 6 {
+		command = fields[5]
+	}
+
 	return &Pane{
-		ID:     fields[0],
-		Left:   left,
-		Top:    top,
-		Width:  width,
-		Height: height,
-		Mode:   ModeOff,
+		ID:      fields[0],
+		Left:    left,
+		Top:     top,
+		Width:   width,
+		Height:  height,
+		Command: command,
+		Mode:    ModeOff,
 	}, nil
 }
 
