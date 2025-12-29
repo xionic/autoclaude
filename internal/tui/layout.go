@@ -173,15 +173,14 @@ func drawPane(grid [][]string, p *tmux.Pane, selected bool, scaleX, scaleY float
 	paneWidth := x2 - x1 - 2 // Available width inside borders
 
 	if p.HasClaudeCode {
-		// CC panes: show mode on center line, title below
+		// CC panes: show mode on center line, "claude code" below
 		modeLabel := p.Mode.String()
 		drawCenteredText(grid, modeLabel, x1, x2, centerY, labelStyle)
 
-		// Show title below if there's room
-		if centerY+1 < y2 && p.Title != "" {
+		// Show "claude code" label below if there's room
+		if centerY+1 < y2 {
 			titleStyle := lipgloss.NewStyle().Foreground(labelColor).Italic(true)
-			title := truncate(p.Title, paneWidth)
-			drawCenteredText(grid, title, x1, x2, centerY+1, titleStyle)
+			drawCenteredText(grid, "claude code", x1, x2, centerY+1, titleStyle)
 		}
 	} else {
 		// Non-CC panes: just show title in italics
