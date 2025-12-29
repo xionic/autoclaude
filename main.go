@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -12,6 +13,9 @@ import (
 var version = "dev"
 
 func main() {
+	testPattern := flag.String("test-pattern", "", "Test mode: trigger auto-continue when this string is found (for debugging)")
+	flag.Parse()
+
 	// Validate tmux environment
 	if err := tmux.CheckTmuxEnv(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -19,7 +23,7 @@ func main() {
 	}
 
 	p := tea.NewProgram(
-		tui.New(version),
+		tui.New(version, *testPattern),
 		tea.WithAltScreen(),
 	)
 

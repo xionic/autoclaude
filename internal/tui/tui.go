@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -71,13 +72,15 @@ type Model struct {
 	ownWindowID    string    // The window to monitor (pinned at startup)
 	err            error
 	errTime        time.Time // When the error occurred (for auto-clear)
+	testPattern    string    // Test mode: trigger on this string instead of rate limit
 }
 
-func New(version string) Model {
+func New(version string, testPattern string) Model {
 	return Model{
-		version: version,
-		width:   80,
-		height:  24,
+		version:     version,
+		testPattern: testPattern,
+		width:       80,
+		height:      24,
 	}
 }
 
@@ -200,6 +203,11 @@ func (m *Model) pollPanes() {
 
 			// Auto-continue: if rate limit just reset and mode is auto
 			if wasLimited && !status.IsLimited && pane.Mode == tmux.ModeContinueOnRateLimit {
+				m.sendContinue(pane.ID)
+			}
+
+			// Test mode: trigger on test pattern
+			if m.testPattern != "" && strings.Contains(content, m.testPattern) && pane.Mode == tmux.ModeContinueOnRateLimit {
 				m.sendContinue(pane.ID)
 			}
 		} else {
@@ -328,33 +336,37 @@ func (m Model) View() string {
 		Height(mainHeight).
 		Render(content)
 
-	// Footer with selected pane info and help
-	var footerParts []string
-
-	// Show selected pane status
+	// Footer with selected pane status (left) and help (right)
+	var statusText string
 	if m.layout != nil {
 		if pane := m.layout.PaneByID(m.selectedPaneID); pane != nil {
 			if pane.HasClaudeCode {
-				var status string
 				if pane.IsRateLimited {
-					status = errorStyle.Render("⏳ Rate limited")
+					statusText = errorStyle.Render("⏳ Rate limited")
 					if pane.RateLimitResets != "" {
-						status += dimTextStyle.Render(" resets " + pane.RateLimitResets)
+						statusText += dimTextStyle.Render(" resets " + pane.RateLimitResets)
 					}
 				} else if pane.Mode == tmux.ModeContinueOnRateLimit {
-					status = lipgloss.NewStyle().Foreground(lipgloss.Color("#50fa7b")).Render("● Auto-continue enabled")
+					statusText = lipgloss.NewStyle().Foreground(lipgloss.Color("#50fa7b")).Render("● Auto-continue enabled")
 				} else {
-					status = dimTextStyle.Render("○ Auto-continue disabled")
+					statusText = dimTextStyle.Render("○ Auto-continue disabled")
 				}
-				footerParts = append(footerParts, status)
 			}
 		}
 	}
 
-	// Help text
-	footerParts = append(footerParts, dimTextStyle.Render("←↑↓→ navigate • tab toggle • q quit"))
+	helpText := dimTextStyle.Render("←↑↓→ navigate • tab toggle • q quit")
 
-	footer := "  " + lipgloss.JoinHorizontal(lipgloss.Center, footerParts...)
+	// Calculate spacing to right-align help text
+	statusLen := lipgloss.Width(statusText)
+	helpLen := lipgloss.Width(helpText)
+	footerWidth := m.width - 4
+	footerSpacerLen := footerWidth - statusLen - helpLen
+	if footerSpacerLen < 1 {
+		footerSpacerLen = 1
+	}
+	footerSpacer := lipgloss.NewStyle().Width(footerSpacerLen).Render("")
+	footer := "  " + statusText + footerSpacer + helpText
 
 	// Compose the full view
 	return lipgloss.JoinVertical(lipgloss.Left, header, mainPane, footer)
