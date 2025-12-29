@@ -63,16 +63,18 @@ type initMsg struct {
 }
 
 type Model struct {
-	version        string
-	width          int
-	height         int
-	layout         *tmux.Layout
-	selectedPaneID string
-	ownPaneID      string    // The pane running autoclaude (excluded from detection)
-	ownWindowID    string    // The window to monitor (pinned at startup)
-	err            error
-	errTime        time.Time // When the error occurred (for auto-clear)
-	testPattern    string    // Test mode: trigger on this string instead of rate limit
+	version          string
+	width            int
+	height           int
+	layout           *tmux.Layout
+	selectedPaneID   string
+	ownPaneID        string    // The pane running autoclaude (excluded from detection)
+	ownWindowID      string    // The window to monitor (pinned at startup)
+	err              error
+	errTime          time.Time // When the error occurred (for auto-clear)
+	testPattern      string    // Test mode: trigger on this string instead of rate limit
+	lastContinueSent time.Time // When we last sent a continue command
+	lastContinuePane string    // Which pane we sent it to
 }
 
 func New(version string, testPattern string) Model {
@@ -223,6 +225,10 @@ func (m *Model) sendContinue(paneID string) {
 	_ = tmux.SendKeys(paneID, "Enter")
 	_ = tmux.SendKeys(paneID, "continue")
 	_ = tmux.SendKeys(paneID, "Enter")
+
+	// Track for UI feedback
+	m.lastContinueSent = time.Now()
+	m.lastContinuePane = paneID
 }
 
 func (m *Model) updateLayout(layout *tmux.Layout) {
@@ -338,7 +344,11 @@ func (m Model) View() string {
 
 	// Footer with selected pane status (left) and help (right)
 	var statusText string
-	if m.layout != nil {
+
+	// Show "continue sent" message for 3 seconds after sending
+	if !m.lastContinueSent.IsZero() && time.Since(m.lastContinueSent) < 3*time.Second {
+		statusText = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1fa8c")).Bold(true).Render("↳ continue sent!")
+	} else if m.layout != nil {
 		if pane := m.layout.PaneByID(m.selectedPaneID); pane != nil {
 			if pane.HasClaudeCode {
 				if pane.IsRateLimited {
