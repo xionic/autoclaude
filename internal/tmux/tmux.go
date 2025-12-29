@@ -43,13 +43,34 @@ func CurrentPaneID() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// ListPanes returns the current layout of panes in the active window
-func ListPanes() (*Layout, error) {
+// CurrentWindowID returns the ID of the window where this process is running
+func CurrentWindowID() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_id}")
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", ErrTimeout
+		}
+		return "", fmt.Errorf("tmux display-message: %w", err)
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+// ListPanes returns the layout of panes in the specified window (or current window if empty)
+func ListPanes(windowID string) (*Layout, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
 	// Format: pane_id pane_left pane_top pane_width pane_height pane_title
-	cmd := exec.CommandContext(ctx, "tmux", "list-panes", "-F", "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_title}")
+	args := []string{"list-panes", "-F", "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_title}"}
+	if windowID != "" {
+		args = append(args, "-t", windowID)
+	}
+	cmd := exec.CommandContext(ctx, "tmux", args...)
 	output, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {

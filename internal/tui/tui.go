@@ -55,9 +55,10 @@ type layoutUpdateMsg struct {
 type pollTickMsg time.Time
 
 type initMsg struct {
-	ownPaneID string
-	layout    *tmux.Layout
-	err       error
+	ownPaneID   string
+	ownWindowID string
+	layout      *tmux.Layout
+	err         error
 }
 
 type Model struct {
@@ -67,6 +68,7 @@ type Model struct {
 	layout         *tmux.Layout
 	selectedPaneID string
 	ownPaneID      string // The pane running autoclaude (excluded from detection)
+	ownWindowID    string // The window to monitor (pinned at startup)
 	err            error
 }
 
@@ -88,12 +90,17 @@ func doInit() tea.Msg {
 		return initMsg{err: err}
 	}
 
-	layout, err := tmux.ListPanes()
+	ownWindowID, err := tmux.CurrentWindowID()
 	if err != nil {
 		return initMsg{ownPaneID: ownPaneID, err: err}
 	}
 
-	return initMsg{ownPaneID: ownPaneID, layout: layout}
+	layout, err := tmux.ListPanes(ownWindowID)
+	if err != nil {
+		return initMsg{ownPaneID: ownPaneID, ownWindowID: ownWindowID, err: err}
+	}
+
+	return initMsg{ownPaneID: ownPaneID, ownWindowID: ownWindowID, layout: layout}
 }
 
 func tickCmd() tea.Cmd {
@@ -102,9 +109,11 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func fetchLayout() tea.Msg {
-	layout, err := tmux.ListPanes()
-	return layoutUpdateMsg{layout: layout, err: err}
+func fetchLayoutCmd(windowID string) tea.Cmd {
+	return func() tea.Msg {
+		layout, err := tmux.ListPanes(windowID)
+		return layoutUpdateMsg{layout: layout, err: err}
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -135,6 +144,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ownPaneID = msg.ownPaneID
+		m.ownWindowID = msg.ownWindowID
 		m.updateLayout(msg.layout)
 		m.pollPanes() // Poll immediately
 		return m, tickCmd()
@@ -148,7 +158,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pollTickMsg:
 		m.pollPanes()
-		return m, tea.Batch(fetchLayout, tickCmd())
+		return m, tea.Batch(fetchLayoutCmd(m.ownWindowID), tickCmd())
 	}
 
 	return m, nil
