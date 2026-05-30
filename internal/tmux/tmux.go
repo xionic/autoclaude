@@ -60,17 +60,28 @@ func CurrentWindowID() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// ListPanes returns the layout of panes in the specified window (or current window if empty)
+// ListPanes returns the layout of every pane across all tmux sessions/windows.
+// The windowID arg is accepted for backwards compatibility but ignored — we always
+// enumerate the entire server so autoclaude can watch panes wherever Claude Code runs.
 func ListPanes(windowID string) (*Layout, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	// Format: pane_id pane_left pane_top pane_width pane_height pane_title
-	args := []string{"list-panes", "-F", "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_title}"}
-	if windowID != "" {
-		args = append(args, "-t", windowID)
-	}
-	cmd := exec.CommandContext(ctx, "tmux", args...)
+	const sep = "\x1f"
+	format := strings.Join([]string{
+		"#{pane_id}",
+		"#{session_name}",
+		"#{window_index}",
+		"#{window_name}",
+		"#{pane_index}",
+		"#{pane_left}",
+		"#{pane_top}",
+		"#{pane_width}",
+		"#{pane_height}",
+		"#{pane_title}",
+	}, sep)
+
+	cmd := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", format)
 	output, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -79,11 +90,11 @@ func ListPanes(windowID string) (*Layout, error) {
 		return nil, fmt.Errorf("tmux list-panes: %w", err)
 	}
 
-	return parseListPanes(string(output))
+	return parseListPanes(string(output), sep)
 }
 
 // parseListPanes parses the output of tmux list-panes
-func parseListPanes(output string) (*Layout, error) {
+func parseListPanes(output, sep string) (*Layout, error) {
 	layout := &Layout{
 		Panes: make([]*Pane, 0),
 	}
@@ -95,7 +106,7 @@ func parseListPanes(output string) (*Layout, error) {
 			continue
 		}
 
-		pane, err := parsePaneLine(line)
+		pane, err := parsePaneLine(line, sep)
 		if err != nil {
 			return nil, fmt.Errorf("parse pane line %q: %w", line, err)
 		}
@@ -106,46 +117,46 @@ func parseListPanes(output string) (*Layout, error) {
 }
 
 // parsePaneLine parses a single line of tmux list-panes output
-func parsePaneLine(line string) (*Pane, error) {
-	fields := strings.Fields(line)
-	if len(fields) < 5 {
-		return nil, fmt.Errorf("expected at least 5 fields, got %d", len(fields))
+func parsePaneLine(line, sep string) (*Pane, error) {
+	fields := strings.Split(line, sep)
+	if len(fields) < 9 {
+		return nil, fmt.Errorf("expected at least 9 fields, got %d", len(fields))
 	}
 
-	left, err := strconv.Atoi(fields[1])
+	left, err := strconv.Atoi(fields[5])
 	if err != nil {
 		return nil, fmt.Errorf("parse left: %w", err)
 	}
-
-	top, err := strconv.Atoi(fields[2])
+	top, err := strconv.Atoi(fields[6])
 	if err != nil {
 		return nil, fmt.Errorf("parse top: %w", err)
 	}
-
-	width, err := strconv.Atoi(fields[3])
+	width, err := strconv.Atoi(fields[7])
 	if err != nil {
 		return nil, fmt.Errorf("parse width: %w", err)
 	}
-
-	height, err := strconv.Atoi(fields[4])
+	height, err := strconv.Atoi(fields[8])
 	if err != nil {
 		return nil, fmt.Errorf("parse height: %w", err)
 	}
 
-	// Title may contain spaces, so join remaining fields
 	title := ""
-	if len(fields) >= 6 {
-		title = strings.Join(fields[5:], " ")
+	if len(fields) >= 10 {
+		title = fields[9]
 	}
 
 	return &Pane{
-		ID:      fields[0],
-		Left:    left,
-		Top:     top,
-		Width:   width,
-		Height:  height,
-		Title:   title,
-		Mode:    ModeOff,
+		ID:          fields[0],
+		Session:     fields[1],
+		WindowIndex: fields[2],
+		WindowName:  fields[3],
+		PaneIndex:   fields[4],
+		Left:        left,
+		Top:         top,
+		Width:       width,
+		Height:      height,
+		Title:       title,
+		Mode:        ModeContinueOnRateLimit,
 	}, nil
 }
 

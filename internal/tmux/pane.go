@@ -32,6 +32,10 @@ const (
 // Pane represents a tmux pane with its position and state
 type Pane struct {
 	ID                    string
+	Session               string
+	WindowIndex           string
+	WindowName            string
+	PaneIndex             string
 	Left, Top             int
 	Width, Height         int
 	Title                 string // Pane title (set by running application)
@@ -42,6 +46,16 @@ type Pane struct {
 	RateLimitTime         time.Time // Parsed reset time (zero if unknown)
 	ContinueSent          bool      // Whether we've sent continue for this rate limit
 	LastPeriodicContinue  time.Time // For unknown reset times: when we last sent periodic continue
+}
+
+// Location returns the human-readable session:window.pane label
+func (p *Pane) Location() string {
+	loc := p.Session + ":" + p.WindowIndex
+	if p.WindowName != "" {
+		loc += "(" + p.WindowName + ")"
+	}
+	loc += "." + p.PaneIndex
+	return loc
 }
 
 // Center returns the center point of the pane

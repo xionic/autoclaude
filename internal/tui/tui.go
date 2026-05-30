@@ -13,16 +13,13 @@ import (
 
 const pollInterval = 3 * time.Second
 
-// Colors - bold, high-contrast palette
 var (
-	accentCyan   = lipgloss.Color("#00ffff") // Bright cyan
-	accentPurple = lipgloss.Color("#bd93f9") // Soft purple
-	brightWhite  = lipgloss.Color("#f8f8f2") // Off-white
-	mutedGray    = lipgloss.Color("#6272a4") // Muted blue-gray
-	borderColor  = lipgloss.Color("#44475a") // Dark purple-gray
+	accentCyan   = lipgloss.Color("#00ffff")
+	accentPurple = lipgloss.Color("#bd93f9")
+	mutedGray    = lipgloss.Color("#6272a4")
+	borderColor  = lipgloss.Color("#44475a")
 )
 
-// Styles
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -48,7 +45,6 @@ var (
 			Bold(true)
 )
 
-// Messages
 type layoutUpdateMsg struct {
 	layout *tmux.Layout
 	err    error
@@ -57,10 +53,9 @@ type layoutUpdateMsg struct {
 type pollTickMsg time.Time
 
 type initMsg struct {
-	ownPaneID   string
-	ownWindowID string
-	layout      *tmux.Layout
-	err         error
+	ownPaneID string
+	layout    *tmux.Layout
+	err       error
 }
 
 type Model struct {
@@ -69,14 +64,13 @@ type Model struct {
 	height           int
 	layout           *tmux.Layout
 	selectedPaneID   string
-	ownPaneID        string    // The pane running autoclaude (excluded from detection)
-	ownWindowID      string    // The window to monitor (pinned at startup)
+	ownPaneID        string
 	err              error
-	errTime          time.Time // When the error occurred (for auto-clear)
-	testPattern      string    // Test mode: trigger on this string instead of rate limit
-	lastContinueSent time.Time // When we last sent a continue command
-	lastContinuePane string    // Which pane we sent it to
-	showHelp         bool      // Whether to show the help overlay
+	errTime          time.Time
+	testPattern      string
+	lastContinueSent time.Time
+	lastContinuePane string
+	showHelp         bool
 }
 
 func New(version string, testPattern string) Model {
@@ -98,17 +92,12 @@ func doInit() tea.Msg {
 		return initMsg{err: err}
 	}
 
-	ownWindowID, err := tmux.CurrentWindowID()
+	layout, err := tmux.ListPanes("")
 	if err != nil {
 		return initMsg{ownPaneID: ownPaneID, err: err}
 	}
 
-	layout, err := tmux.ListPanes(ownWindowID)
-	if err != nil {
-		return initMsg{ownPaneID: ownPaneID, ownWindowID: ownWindowID, err: err}
-	}
-
-	return initMsg{ownPaneID: ownPaneID, ownWindowID: ownWindowID, layout: layout}
+	return initMsg{ownPaneID: ownPaneID, layout: layout}
 }
 
 func tickCmd() tea.Cmd {
@@ -117,9 +106,9 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func fetchLayoutCmd(windowID string) tea.Cmd {
+func fetchLayoutCmd() tea.Cmd {
 	return func() tea.Msg {
-		layout, err := tmux.ListPanes(windowID)
+		layout, err := tmux.ListPanes("")
 		return layoutUpdateMsg{layout: layout, err: err}
 	}
 }
@@ -127,7 +116,6 @@ func fetchLayoutCmd(windowID string) tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// If help is shown, any key dismisses it
 		if m.showHelp {
 			m.showHelp = false
 			return m, nil
@@ -138,15 +126,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "h", "?":
 			m.showHelp = true
-		case "left":
-			m.moveSelection(tmux.DirLeft)
-		case "right":
-			m.moveSelection(tmux.DirRight)
-		case "up":
-			m.moveSelection(tmux.DirUp)
-		case "down":
-			m.moveSelection(tmux.DirDown)
-		case "tab":
+		case "up", "k":
+			m.moveSelection(-1)
+		case "down", "j":
+			m.moveSelection(1)
+		case "tab", " ":
 			m.cycleMode()
 		case "a":
 			m.enableAll()
@@ -154,7 +138,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.disableAll()
 		case "r":
 			m.pollPanes()
-			return m, fetchLayoutCmd(m.ownWindowID)
+			return m, fetchLayoutCmd()
 		}
 
 	case tea.WindowSizeMsg:
@@ -168,9 +152,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ownPaneID = msg.ownPaneID
-		m.ownWindowID = msg.ownWindowID
 		m.updateLayout(msg.layout)
-		m.pollPanes() // Poll immediately
+		m.pollPanes()
 		return m, tickCmd()
 
 	case layoutUpdateMsg:
@@ -182,12 +165,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case pollTickMsg:
-		// Clear errors after 10 seconds
 		if m.err != nil && time.Since(m.errTime) > 10*time.Second {
 			m.err = nil
 		}
 		m.pollPanes()
-		return m, tea.Batch(fetchLayoutCmd(m.ownWindowID), tickCmd())
+		return m, tea.Batch(fetchLayoutCmd(), tickCmd())
 	}
 
 	return m, nil
@@ -199,7 +181,6 @@ func (m *Model) pollPanes() {
 	}
 
 	for _, pane := range m.layout.Panes {
-		// Skip our own pane
 		if pane.ID == m.ownPaneID {
 			pane.HasClaudeCode = false
 			continue
@@ -212,34 +193,28 @@ func (m *Model) pollPanes() {
 
 		pane.HasClaudeCode = detection.IsClaudeCode(content)
 
-		// Check rate limit status for Claude Code panes
 		if pane.HasClaudeCode {
 			status := detection.CheckRateLimit(content)
 
-			// Track rate limit state
 			wasLimited := pane.IsRateLimited
 			pane.IsRateLimited = status.IsLimited
 			pane.RateLimitResets = status.ResetsAt
 			pane.RateLimitTime = status.ResetTime
 
-			// Reset ContinueSent and LastPeriodicContinue when a new rate limit appears
 			if !wasLimited && status.IsLimited {
 				pane.ContinueSent = false
 				pane.LastPeriodicContinue = time.Time{}
 			}
 
-			// Auto-continue logic for rate-limited panes in auto mode
 			if pane.IsRateLimited && pane.Mode == tmux.ModeContinueOnRateLimit {
 				now := time.Now()
 
 				if !pane.RateLimitTime.IsZero() {
-					// Known reset time: send continue when time has passed
 					if !pane.ContinueSent && now.After(pane.RateLimitTime) {
 						m.sendContinue(pane.ID)
 						pane.ContinueSent = true
 					}
 				} else {
-					// Unknown reset time: send continue every 15 minutes
 					periodicInterval := 15 * time.Minute
 					if pane.LastPeriodicContinue.IsZero() || now.Sub(pane.LastPeriodicContinue) >= periodicInterval {
 						m.sendContinue(pane.ID)
@@ -248,7 +223,6 @@ func (m *Model) pollPanes() {
 				}
 			}
 
-			// Test mode: trigger on test pattern (with cooldown)
 			if m.testPattern != "" &&
 				strings.Contains(content, m.testPattern) &&
 				pane.Mode == tmux.ModeContinueOnRateLimit &&
@@ -266,21 +240,21 @@ func (m *Model) pollPanes() {
 	}
 }
 
-// sendContinue sends the continue command sequence to a pane
+// sendContinue dismisses any blocking menu Claude Code shows on rate limit,
+// then sends "continue" + Enter. The 500ms gap gives the menu time to tear down
+// and the prompt to re-render before we type — at 100ms keys raced the redraw
+// and landed nowhere.
 func (m *Model) sendContinue(paneID string) {
-	// Send: Escape (dismiss any menu), wait for UI to settle, then "continue", Enter
 	_ = tmux.SendKeys(paneID, "Escape")
-	time.Sleep(100 * time.Millisecond) // Wait for Escape to be processed
+	time.Sleep(500 * time.Millisecond)
 	_ = tmux.SendKeys(paneID, "continue")
 	_ = tmux.SendKeys(paneID, "Enter")
 
-	// Track for UI feedback
 	m.lastContinueSent = time.Now()
 	m.lastContinuePane = paneID
 }
 
 func (m *Model) updateLayout(layout *tmux.Layout) {
-	// Preserve state from old layout
 	if m.layout != nil && layout != nil {
 		for _, newPane := range layout.Panes {
 			if oldPane := m.layout.PaneByID(newPane.ID); oldPane != nil {
@@ -297,31 +271,28 @@ func (m *Model) updateLayout(layout *tmux.Layout) {
 
 	m.layout = layout
 
-	// Ensure we have a selected pane
 	if layout != nil && len(layout.Panes) > 0 {
-		// Keep current selection if still valid
 		if m.selectedPaneID != "" && layout.PaneByID(m.selectedPaneID) != nil {
 			return
 		}
-		// Otherwise select first pane
 		m.selectedPaneID = layout.Panes[0].ID
 	}
 }
 
-func (m *Model) moveSelection(dir tmux.Direction) {
-	if m.layout == nil {
+func (m *Model) moveSelection(delta int) {
+	if m.layout == nil || len(m.layout.Panes) == 0 {
 		return
 	}
 
-	current := m.layout.PaneByID(m.selectedPaneID)
-	if current == nil {
-		return
+	idx := 0
+	for i, p := range m.layout.Panes {
+		if p.ID == m.selectedPaneID {
+			idx = i
+			break
+		}
 	}
-
-	next := m.layout.PaneInDirection(current, dir)
-	if next != nil {
-		m.selectedPaneID = next.ID
-	}
+	idx = (idx + delta + len(m.layout.Panes)) % len(m.layout.Panes)
+	m.selectedPaneID = m.layout.Panes[idx].ID
 }
 
 func (m *Model) cycleMode() {
@@ -330,25 +301,18 @@ func (m *Model) cycleMode() {
 	}
 
 	pane := m.layout.PaneByID(m.selectedPaneID)
-	if pane == nil {
-		return
-	}
-
-	// Only allow mode changes on Claude Code panes
-	if !pane.HasClaudeCode {
+	if pane == nil || pane.ID == m.ownPaneID {
 		return
 	}
 
 	if pane.Mode == tmux.ModeOff {
 		pane.Mode = tmux.ModeContinueOnRateLimit
-		// Check rate limit immediately when enabling
 		m.checkPaneRateLimit(pane)
 	} else {
 		pane.Mode = tmux.ModeOff
 	}
 }
 
-// checkPaneRateLimit checks the rate limit status for a single pane
 func (m *Model) checkPaneRateLimit(pane *tmux.Pane) {
 	if pane == nil || pane.ID == m.ownPaneID {
 		return
@@ -371,8 +335,11 @@ func (m *Model) enableAll() {
 		return
 	}
 	for _, pane := range m.layout.Panes {
+		if pane.ID == m.ownPaneID {
+			continue
+		}
+		pane.Mode = tmux.ModeContinueOnRateLimit
 		if pane.HasClaudeCode {
-			pane.Mode = tmux.ModeContinueOnRateLimit
 			m.checkPaneRateLimit(pane)
 		}
 	}
@@ -383,26 +350,21 @@ func (m *Model) disableAll() {
 		return
 	}
 	for _, pane := range m.layout.Panes {
-		if pane.HasClaudeCode {
-			pane.Mode = tmux.ModeOff
-		}
+		pane.Mode = tmux.ModeOff
 	}
 }
 
 func (m Model) View() string {
-	// Show help overlay if active
 	if m.showHelp {
 		return m.renderHelp()
 	}
 
-	// Header with title and version
 	title := titleStyle.Render("autoclaude")
 	version := versionStyle.Render(fmt.Sprintf("v%s", m.version))
 	headerWidth := m.width - 4
 	if headerWidth < 20 {
 		headerWidth = 20
 	}
-	// Place title left, version right
 	titleLen := lipgloss.Width(title)
 	versionLen := lipgloss.Width(version)
 	spacerLen := headerWidth - titleLen - versionLen
@@ -412,27 +374,22 @@ func (m Model) View() string {
 	spacer := lipgloss.NewStyle().Width(spacerLen).Render("")
 	header := headerStyle.Render(title + spacer + version)
 
-	// Calculate main pane dimensions
 	mainWidth := m.width - 4
 	if mainWidth < 10 {
 		mainWidth = 10
 	}
-	mainHeight := m.height - 7 // Account for header + 2-line footer + margins
+	mainHeight := m.height - 7
 	if mainHeight < 3 {
 		mainHeight = 3
 	}
 
-	// Render content
 	var content string
 	if m.err != nil {
 		content = errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	} else if m.layout == nil || len(m.layout.Panes) == 0 {
 		content = dimTextStyle.Render("No panes found")
 	} else {
-		// Render the ASCII layout
-		layoutWidth := mainWidth - 4  // Account for padding
-		layoutHeight := mainHeight - 2
-		content = renderLayout(m.layout, m.selectedPaneID, layoutWidth, layoutHeight)
+		content = renderLayout(m.layout, m.selectedPaneID, m.ownPaneID, mainWidth-4, mainHeight-2)
 	}
 
 	mainPane := mainPaneStyle.
@@ -440,19 +397,15 @@ func (m Model) View() string {
 		Height(mainHeight).
 		Render(content)
 
-	// Footer with selected pane status (left) and help (right)
 	var statusText string
 
-	// Show "continue sent" message for 20 seconds after sending
 	if !m.lastContinueSent.IsZero() && time.Since(m.lastContinueSent) < 20*time.Second {
-		statusText = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1fa8c")).Bold(true).Render("↳ continue sent!")
+		statusText = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1fa8c")).Bold(true).Render("↳ continue sent to " + m.lastContinuePane)
 	} else if m.layout != nil {
 		if pane := m.layout.PaneByID(m.selectedPaneID); pane != nil {
 			if pane.HasClaudeCode {
-				// Always show auto-continue status first
 				if pane.Mode == tmux.ModeContinueOnRateLimit {
 					statusText = lipgloss.NewStyle().Foreground(lipgloss.Color("#50fa7b")).Render("● Auto-continue enabled")
-					// Add rate limit info on same line if applicable (only when auto mode)
 					if pane.IsRateLimited {
 						if pane.ContinueSent {
 							statusText += lipgloss.NewStyle().Foreground(lipgloss.Color("#f1fa8c")).Bold(true).Render(" continue sent")
@@ -469,9 +422,8 @@ func (m Model) View() string {
 		}
 	}
 
-	helpText := dimTextStyle.Render("←↑↓→ nav • tab toggle • a on • n off • r refresh • h help • q quit")
+	helpText := dimTextStyle.Render("↑↓ nav • tab toggle • a on • n off • r refresh • h help • q quit")
 
-	// Footer: status on first line, help on second line (both left-aligned)
 	var footer string
 	if statusText != "" {
 		footer = "  " + statusText + "\n  " + helpText
@@ -479,7 +431,6 @@ func (m Model) View() string {
 		footer = "  " + helpText
 	}
 
-	// Compose the full view
 	return lipgloss.JoinVertical(lipgloss.Left, header, mainPane, footer)
 }
 
@@ -493,34 +444,35 @@ func (m Model) renderHelp() string {
 	titleLine := titleStyle.Render("autoclaude") + " " + versionStyle.Render(fmt.Sprintf("v%s", m.version))
 
 	helpContent := `
-Monitors tmux panes running Claude Code and automatically
-sends "continue" when rate limits reset.
+Watches every tmux pane on the server for Claude Code rate-limit
+messages and sends "continue" once the limit resets. Auto-continue
+is on by default for every pane.
 
 ` + lipgloss.NewStyle().Bold(true).Foreground(accentCyan).Render("KEYS") + `
 
-  ←↑↓→      Navigate between panes
-  tab       Toggle auto-continue for selected pane
-  a         Enable auto-continue for all Claude Code panes
-  n         Disable auto-continue for all Claude Code panes
-  r         Refresh pane layout
-  h / ?     Show this help
-  q         Quit
+  ↑↓ / j k   Navigate panes
+  tab/space  Toggle auto-continue for selected pane
+  a          Enable auto-continue for every pane
+  n          Disable auto-continue for every pane
+  r          Refresh pane list
+  h / ?      Show this help
+  q          Quit
 
-` + lipgloss.NewStyle().Bold(true).Foreground(accentCyan).Render("PANE COLORS") + `
+` + lipgloss.NewStyle().Bold(true).Foreground(accentCyan).Render("STATUS COLORS") + `
 
-  ` + lipgloss.NewStyle().Foreground(claudeOrange).Render("Orange") + `      Claude Code pane (auto-continue off)
-  ` + lipgloss.NewStyle().Foreground(autoGreen).Render("Green") + `       Claude Code pane (auto-continue on)
-  ` + lipgloss.NewStyle().Foreground(rateLimitRed).Render("Red") + `         Rate limited (waiting for reset)
-  ` + lipgloss.NewStyle().Foreground(accentCyan).Render("Cyan") + `        Selected pane
+  ` + lipgloss.NewStyle().Foreground(autoGreen).Render("auto") + `         Watching this pane, will send continue on reset
+  ` + lipgloss.NewStyle().Foreground(claudeOrange).Render("off") + `          Claude Code detected but auto disabled
+  ` + lipgloss.NewStyle().Foreground(rateLimitRed).Render("resets …") + `     Rate limited, waiting for reset time
+  ` + lipgloss.NewStyle().Foreground(lipgloss.Color("#f1fa8c")).Render("continue sent") + ` Continue already dispatched for this limit
 
 ` + lipgloss.NewStyle().Bold(true).Foreground(accentCyan).Render("HOW IT WORKS") + `
 
   When a Claude Code pane shows a rate limit message like
   "limit reached ∙ resets Xpm" or "You've hit your limit",
   autoclaude waits for that time to pass, then sends:
-  Escape → "continue" → Enter
+  Escape → 500ms → "continue" → Enter
 
-  Polling occurs every 3 seconds.
+  Polling occurs every 3 seconds across all sessions.
 
 ` + dimTextStyle.Render("Made by Henry Stanley (henrystanley.com)") + `
 ` + dimTextStyle.Render("Built with Claude Code")
