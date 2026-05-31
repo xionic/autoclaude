@@ -28,9 +28,13 @@ var rateLimitPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(?:hit\s+your\s+limit|limit\s+reached).*resets?\s+(\d{1,3})m\b`),
 }
 
-// Fallback patterns - detect rate limit without capturing time
-// Used when we can't parse a specific reset time
-// These patterns are more specific to avoid false positives
+// Fallback patterns - detect rate limit without capturing time.
+// Used when we can't parse a specific reset time. Patterns are specific to
+// avoid false positives. The menu pattern matters because Claude Code runs
+// in tmux alt-screen mode, which doesn't write to tmux scrollback — once the
+// "What do you want to do?" menu re-renders, the original "hit your limit"
+// line is gone from any capture-pane output. The menu strings are then the
+// only evidence we still have.
 var rateLimitFallbackPatterns = []*regexp.Regexp{
 	// "You've hit your limit" - Claude Code's primary message
 	regexp.MustCompile(`(?i)you['']ve\s+hit\s+your\s+limit`),
@@ -38,6 +42,8 @@ var rateLimitFallbackPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\blimit\s+reached\b`),
 	// "rate limited" as a status indicator
 	regexp.MustCompile(`(?i)\brate\s+limited\b`),
+	// Blocking menu shown by Claude Code v2.1.x after rate limit
+	regexp.MustCompile(`(?i)stop\s+and\s+wait\s+for\s+limit\s+to\s+reset`),
 }
 
 // CheckRateLimit checks pane content for rate limit messages
