@@ -45,8 +45,11 @@ type Pane struct {
 	RateLimitResets       string    // Display string like "10pm" or empty if unknown
 	RateLimitTime         time.Time // Parsed reset time (zero if unknown)
 	ContinueSent          bool      // Whether we've sent continue for this rate limit
-	LastPeriodicContinue  time.Time // For unknown reset times: when we last sent periodic continue
+	LastPeriodicContinue  time.Time // (deprecated) was used by the removed 15-min fallback
 	MenuHandled           bool      // Whether we've selected option 2 in the v2.1 blocking picker
+	LimitedSince          time.Time // When the rate limit was first observed (for probe gating)
+	ProbeAt               time.Time // When to send the next exploratory continue probe
+	ProbeCount            int       // How many probes have failed (drives backoff)
 }
 
 // Location returns the human-readable session:window.pane label

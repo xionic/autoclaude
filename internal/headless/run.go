@@ -15,7 +15,29 @@ import (
 	"github.com/henryaj/autoclaude/internal/tmux"
 )
 
-const pollInterval = 3 * time.Second
+const (
+	pollInterval = 3 * time.Second
+
+	// probeMinIdle is how long a pane must have been continuously rate-limited
+	// before probing begins. Stops us from interrupting a freshly-limited pane
+	// where the user might still be composing a follow-up.
+	probeMinIdle = 5 * time.Minute
+)
+
+// probeBackoff returns how long to wait before the next probe after `n` failed
+// probes. Schedule: 5m, 10m, 15m, 30m, then 30m forever.
+func probeBackoff(n int) time.Duration {
+	schedule := []time.Duration{
+		5 * time.Minute,
+		10 * time.Minute,
+		15 * time.Minute,
+		30 * time.Minute,
+	}
+	if n >= len(schedule) {
+		return schedule[len(schedule)-1]
+	}
+	return schedule[n]
+}
 
 // Run starts the headless polling loop. Blocks until SIGINT/SIGTERM.
 func Run(testPattern string) error {
@@ -89,6 +111,9 @@ func (s *state) poll(testPattern string) {
 			p.ContinueSent = prev.ContinueSent
 			p.LastPeriodicContinue = prev.LastPeriodicContinue
 			p.MenuHandled = prev.MenuHandled
+			p.LimitedSince = prev.LimitedSince
+			p.ProbeAt = prev.ProbeAt
+			p.ProbeCount = prev.ProbeCount
 		}
 		s.panes[p.ID] = p
 		s.processPane(p, testPattern)
@@ -111,12 +136,7 @@ func (s *state) processPane(p *tmux.Pane, testPattern string) {
 		if p.IsRateLimited {
 			s.logger.Printf("INFO pane=%s claude=gone clearing-state", p.Location())
 		}
-		p.IsRateLimited = false
-		p.RateLimitResets = ""
-		p.RateLimitTime = time.Time{}
-		p.ContinueSent = false
-		p.LastPeriodicContinue = time.Time{}
-		p.MenuHandled = false
+		s.clearLimitState(p)
 		return
 	}
 
@@ -126,24 +146,53 @@ func (s *state) processPane(p *tmux.Pane, testPattern string) {
 	p.RateLimitResets = status.ResetsAt
 	p.RateLimitTime = status.ResetTime
 
+	now := time.Now()
+
 	if !wasLimited && status.IsLimited {
 		p.ContinueSent = false
-		p.LastPeriodicContinue = time.Time{}
 		p.MenuHandled = false
-		s.logger.Printf("INFO pane=%s rate-limited menu=%v resets=%q", p.Location(), status.MenuShown, status.ResetsAt)
+		p.LimitedSince = now
+		p.ProbeAt = now.Add(probeBackoff(0))
+		p.ProbeCount = 0
+		s.logger.Printf("INFO pane=%s rate-limited menu=%v resets=%q first-probe-at=+%s",
+			p.Location(), status.MenuShown, status.ResetsAt, probeBackoff(0))
+	}
+
+	if wasLimited && !status.IsLimited {
+		s.logger.Printf("INFO pane=%s rate-limit cleared (duration=%s probes=%d)",
+			p.Location(), now.Sub(p.LimitedSince).Round(time.Second), p.ProbeCount)
+		s.clearLimitState(p)
 	}
 
 	if p.IsRateLimited && p.Mode == tmux.ModeContinueOnRateLimit {
-		if status.MenuShown && !p.MenuHandled {
+		if status.MenuShown {
+			if p.MenuHandled {
+				// Menu re-rendered after we dismissed → previous probe (or
+				// claude's own retry) was rejected. Count it as a failed
+				// probe and reset menu state so we dismiss again below.
+				p.ProbeCount++
+				p.ProbeAt = now.Add(probeBackoff(p.ProbeCount))
+				s.logger.Printf("INFO pane=%s probe-failed (count=%d next-probe=+%s)",
+					p.Location(), p.ProbeCount, probeBackoff(p.ProbeCount))
+				p.MenuHandled = false
+			}
 			s.dismissMenu(p, content)
 			p.MenuHandled = true
 			return
 		}
 
-		now := time.Now()
 		if !p.RateLimitTime.IsZero() && !p.ContinueSent && now.After(p.RateLimitTime) {
 			s.sendContinue(p, "reset-elapsed")
 			p.ContinueSent = true
+			return
+		}
+
+		if !p.ContinueSent && now.After(p.ProbeAt) && now.Sub(p.LimitedSince) >= probeMinIdle {
+			s.sendContinue(p, fmt.Sprintf("probe-%d", p.ProbeCount))
+			// Don't bump ProbeCount yet; bump only if next tick shows menu
+			// re-render (failure). On success, IsRateLimited goes false and
+			// state clears via the wasLimited→!IsLimited branch above.
+			p.ProbeAt = now.Add(probeBackoff(p.ProbeCount + 1))
 		}
 	}
 
@@ -152,6 +201,17 @@ func (s *state) processPane(p *tmux.Pane, testPattern string) {
 		s.sendContinue(p, "test-pattern")
 		p.ContinueSent = true
 	}
+}
+
+func (s *state) clearLimitState(p *tmux.Pane) {
+	p.IsRateLimited = false
+	p.RateLimitResets = ""
+	p.RateLimitTime = time.Time{}
+	p.ContinueSent = false
+	p.MenuHandled = false
+	p.LimitedSince = time.Time{}
+	p.ProbeAt = time.Time{}
+	p.ProbeCount = 0
 }
 
 func (s *state) dismissMenu(p *tmux.Pane, content string) {
