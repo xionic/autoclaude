@@ -46,6 +46,7 @@ type Pane struct {
 	RateLimitTime         time.Time // Parsed reset time (zero if unknown)
 	ContinueSent          bool      // Whether we've sent continue for this rate limit
 	LastPeriodicContinue  time.Time // For unknown reset times: when we last sent periodic continue
+	MenuHandled           bool      // Whether we've selected option 2 in the v2.1 blocking picker
 }
 
 // Location returns the human-readable session:window.pane label

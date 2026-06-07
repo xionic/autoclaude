@@ -204,22 +204,20 @@ func (m *Model) pollPanes() {
 			if !wasLimited && status.IsLimited {
 				pane.ContinueSent = false
 				pane.LastPeriodicContinue = time.Time{}
+				pane.MenuHandled = false
 			}
 
 			if pane.IsRateLimited && pane.Mode == tmux.ModeContinueOnRateLimit {
-				now := time.Now()
+				if status.MenuShown && !pane.MenuHandled {
+					m.dismissMenu(pane.ID, content)
+					pane.MenuHandled = true
+					continue
+				}
 
-				if !pane.RateLimitTime.IsZero() {
-					if !pane.ContinueSent && now.After(pane.RateLimitTime) {
-						m.sendContinue(pane.ID)
-						pane.ContinueSent = true
-					}
-				} else {
-					periodicInterval := 15 * time.Minute
-					if pane.LastPeriodicContinue.IsZero() || now.Sub(pane.LastPeriodicContinue) >= periodicInterval {
-						m.sendContinue(pane.ID)
-						pane.LastPeriodicContinue = now
-					}
+				now := time.Now()
+				if !pane.RateLimitTime.IsZero() && !pane.ContinueSent && now.After(pane.RateLimitTime) {
+					m.sendContinue(pane.ID)
+					pane.ContinueSent = true
 				}
 			}
 
@@ -236,17 +234,40 @@ func (m *Model) pollPanes() {
 			pane.RateLimitTime = time.Time{}
 			pane.ContinueSent = false
 			pane.LastPeriodicContinue = time.Time{}
+			pane.MenuHandled = false
 		}
 	}
 }
 
-// sendContinue dismisses any blocking menu Claude Code shows on rate limit,
-// then sends "continue" + Enter. The 500ms gap gives the menu time to tear down
-// and the prompt to re-render before we type — at 100ms keys raced the redraw
-// and landed nowhere.
+// dismissMenu navigates to the "Stop and wait for limit to reset" row in the
+// rate-limit picker and presses Enter. Layout-aware: parses the captured
+// content to find the current cursor row and target row, then sends the
+// appropriate number of Up/Down keys. Falls back silently if the menu can't
+// be parsed.
+func (m *Model) dismissMenu(paneID, content string) {
+	move, ok := detection.FindStopAndWaitMove(content)
+	if !ok {
+		return
+	}
+	key := "Down"
+	if move < 0 {
+		key = "Up"
+		move = -move
+	}
+	for i := 0; i < move; i++ {
+		_ = tmux.SendKeys(paneID, key)
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = tmux.SendKeys(paneID, "Enter")
+
+	m.lastContinueSent = time.Now()
+	m.lastContinuePane = paneID + " (menu)"
+}
+
+// sendContinue types "continue" + Enter to resume the conversation that was
+// cut off by the rate limit. Caller must ensure the menu has been dismissed
+// and the reset time has passed.
 func (m *Model) sendContinue(paneID string) {
-	_ = tmux.SendKeys(paneID, "Escape")
-	time.Sleep(500 * time.Millisecond)
 	_ = tmux.SendKeys(paneID, "continue")
 	_ = tmux.SendKeys(paneID, "Enter")
 

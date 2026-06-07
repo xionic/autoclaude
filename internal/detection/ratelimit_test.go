@@ -56,6 +56,9 @@ func TestCheckRateLimit_NoMatch(t *testing.T) {
 }
 
 func TestCheckRateLimit_TimeFormats(t *testing.T) {
+	// Every case must include the live ⚠ indicator — otherwise detection
+	// (correctly) treats it as chat-history quotation and skips.
+	live := "\n⚠ Limit reached"
 	cases := []struct {
 		name     string
 		content  string
@@ -63,27 +66,27 @@ func TestCheckRateLimit_TimeFormats(t *testing.T) {
 	}{
 		{
 			name:     "simple pm",
-			content:  "You've hit your limit · resets 2pm",
+			content:  "You've hit your limit · resets 2pm" + live,
 			wantTime: "2pm",
 		},
 		{
 			name:     "simple am",
-			content:  "You've hit your limit · resets 9am",
+			content:  "You've hit your limit · resets 9am" + live,
 			wantTime: "9am",
 		},
 		{
 			name:     "with minutes",
-			content:  "limit reached ∙ resets 10:30am",
+			content:  "limit reached ∙ resets 10:30am" + live,
 			wantTime: "10:30am",
 		},
 		{
 			name:     "with space before am/pm",
-			content:  "limit reached ∙ resets 3 pm",
+			content:  "limit reached ∙ resets 3 pm" + live,
 			wantTime: "3 pm",
 		},
 		{
-			name:     "double digit hour",
-			content:  "You've hit your limit · resets 11pm (Europe/London)",
+			name:     "double digit hour TZ",
+			content:  "You've hit your limit · resets 11pm (Europe/London)" + live,
 			wantTime: "11pm",
 		},
 		{
@@ -93,7 +96,7 @@ func TestCheckRateLimit_TimeFormats(t *testing.T) {
 		},
 		{
 			name:     "minutes remaining double digit",
-			content:  "Limit reached (resets 45m)",
+			content:  "Limit reached (resets 45m)" + live,
 			wantTime: "45m",
 		},
 		{
@@ -135,30 +138,18 @@ func TestCheckRateLimit_MinutesFormat(t *testing.T) {
 	}
 }
 
-func TestCheckRateLimit_FallbackNoTime(t *testing.T) {
+func TestCheckRateLimit_FallbackNoTime_LiveIndicatorOnly(t *testing.T) {
 	cases := []struct {
 		name    string
 		content string
 	}{
 		{
-			name:    "hit your limit without time",
-			content: "You've hit your limit",
+			name:    "live ⚠ Limit reached without parseable time",
+			content: "[Opus] ⚠ Limit reached (resets in 2 hours)",
 		},
 		{
-			name:    "hit your limit with curly apostrophe",
-			content: "You've hit your limit",
-		},
-		{
-			name:    "limit reached without time",
-			content: "Limit reached - please wait",
-		},
-		{
-			name:    "rate limited status",
-			content: "⚠ Rate limited",
-		},
-		{
-			name:    "limit reached with unparseable time format",
-			content: "Limit reached (resets in 2 hours)",
+			name:    "live ⚠ Rate limited indicator",
+			content: "Context 50% │ ⚠ Rate limited",
 		},
 	}
 
@@ -178,6 +169,24 @@ func TestCheckRateLimit_FallbackNoTime(t *testing.T) {
 	}
 }
 
+func TestCheckRateLimit_QuotedHistoryNotLimited(t *testing.T) {
+	// Chat-history text that quotes a limit message but the pane is NOT
+	// currently rate-limited (no live ⚠ indicator, no active picker).
+	cases := []string{
+		"User said: You've hit your limit, what now?",
+		"Earlier output: Limit reached (resets 8pm)\n> follow-up prompt",
+		`Quote: "  2. Stop and wait for limit to reset"  was the option I wanted.`,
+	}
+	for _, content := range cases {
+		t.Run(content[:30], func(t *testing.T) {
+			status := CheckRateLimit(content)
+			if status.IsLimited {
+				t.Errorf("quoted history should NOT trigger, got IsLimited=true (resets=%q)", status.ResetsAt)
+			}
+		})
+	}
+}
+
 func TestCheckRateLimit_NoMatchCases(t *testing.T) {
 	cases := []string{
 		"Normal output without rate limit",
@@ -192,6 +201,95 @@ func TestCheckRateLimit_NoMatchCases(t *testing.T) {
 				t.Errorf("expected IsLimited to be false for: %q", content)
 			}
 		})
+	}
+}
+
+func TestCheckRateLimit_StatusBarRelative(t *testing.T) {
+	cases := []struct {
+		name        string
+		content     string
+		wantResets  string
+		wantApproxD time.Duration
+	}{
+		{
+			name:        "hours and minutes",
+			content:     "[Opus 4.7] │ Context 25% │ Usage ⚠ Limit reached (resets in 3h 10m)",
+			wantResets:  "3h 10m",
+			wantApproxD: 3*time.Hour + 10*time.Minute,
+		},
+		{
+			name:        "minutes only",
+			content:     "Usage ⚠ Limit reached (resets in 47m)",
+			wantResets:  "47m",
+			wantApproxD: 47 * time.Minute,
+		},
+		{
+			name:        "alt form 'you've hit your limit'",
+			content:     "You've hit your limit · resets in 2h 5m\n⚠ Limit reached",
+			wantResets:  "2h 5m",
+			wantApproxD: 2*time.Hour + 5*time.Minute,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status := CheckRateLimit(tc.content)
+			if !status.IsLimited {
+				t.Fatal("expected IsLimited=true")
+			}
+			if status.ResetsAt != tc.wantResets {
+				t.Errorf("ResetsAt = %q, want %q", status.ResetsAt, tc.wantResets)
+			}
+			diff := status.TimeUntil - tc.wantApproxD
+			if diff < -time.Second || diff > time.Second {
+				t.Errorf("TimeUntil = %v, want ≈%v (diff %v)", status.TimeUntil, tc.wantApproxD, diff)
+			}
+			if status.ResetTime.IsZero() {
+				t.Error("expected ResetTime set")
+			}
+		})
+	}
+}
+
+func TestCheckRateLimit_StatusBarBelowLimit_NoFalsePositive(t *testing.T) {
+	// Normal status bar with usage <100% must NOT trigger.
+	content := "[Opus 4.7] │ Context 8% │ Usage ██░░░░░░░░ 22% (resets in 4h 36m)"
+	status := CheckRateLimit(content)
+	if status.IsLimited {
+		t.Errorf("normal usage status bar should not trigger, got IsLimited=true (resets=%q)", status.ResetsAt)
+	}
+}
+
+func TestCheckRateLimit_TZAware(t *testing.T) {
+	content := "❯ clear those stashes\n  ⎿  You've hit your limit · resets 7:10pm (America/Sao_Paulo)\n⚠ Limit reached"
+	status := CheckRateLimit(content)
+	if !status.IsLimited {
+		t.Fatal("expected IsLimited=true")
+	}
+	if status.ResetsAt != "7:10pm" {
+		t.Errorf("ResetsAt = %q, want '7:10pm'", status.ResetsAt)
+	}
+	if status.ResetTime.IsZero() {
+		t.Error("expected ResetTime set via LoadLocation")
+	}
+	// Sanity: hour-in-Sao-Paulo should equal 19 when projected back into that zone.
+	loc, _ := time.LoadLocation("America/Sao_Paulo")
+	if h := status.ResetTime.In(loc).Hour(); h != 19 {
+		t.Errorf("ResetTime in America/Sao_Paulo = %dh, want 19h", h)
+	}
+}
+
+func TestCheckRateLimit_MenuShown(t *testing.T) {
+	content := `   What do you want to do?
+   ❯ 1. Upgrade your plan
+     2. Stop and wait for limit to reset
+
+   Enter to confirm · Esc to cancel`
+	status := CheckRateLimit(content)
+	if !status.IsLimited {
+		t.Fatal("expected IsLimited=true (active picker is fallback signal)")
+	}
+	if !status.MenuShown {
+		t.Error("expected MenuShown=true")
 	}
 }
 

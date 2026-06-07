@@ -4,10 +4,6 @@
      Opening your options…
 
 > /rate-limit-options
-╭────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ What do you want to do?                                                                                │
-│                                                                                                        │
-│ ❯ 1. Stop and wait for limit to reset                                                                  │
-│   2. Switch to extra usage                                                                             │
-│   3. Upgrade your plan                                                                                 │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+[Opus 4.7] │ Context 25%
+⚠ Limit reached · resets 10pm

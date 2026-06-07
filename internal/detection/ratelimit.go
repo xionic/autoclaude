@@ -9,48 +9,81 @@ import (
 
 // RateLimitStatus represents the rate limit state of a pane
 type RateLimitStatus struct {
-	IsLimited  bool
-	ResetsAt   string    // Original string like "2pm" or "10:30am"
-	ResetTime  time.Time // Parsed reset time
-	TimeUntil  time.Duration
+	IsLimited bool
+	ResetsAt  string    // Original string like "2pm", "10:30am", "3h 10m"
+	ResetTime time.Time // Parsed reset time (local)
+	TimeUntil time.Duration
+	MenuShown bool // Blocking picker visible (need to select option 2)
 }
 
-// Rate limit patterns - multiple formats Claude Code uses
-// Examples: "limit reached ∙ resets 2pm", "limit reached ∙ resets 10:30am"
-//           "You've hit your limit · resets 10pm (Europe/London)"
-//           "Limit reached (resets 8m)" - minutes remaining format
+// Reset-time patterns, ordered by specificity.
+//   0: TZ-aware absolute, e.g. "You've hit your limit · resets 7:10pm (America/Sao_Paulo)"
+//   1: status-line relative, e.g. "Usage ⚠ Limit reached (resets in 3h 10m)" / "(resets in 47m)"
+//   2: bare absolute, e.g. "You've hit your limit · resets 10pm"
+//   3: bare absolute, "limit reached" prefix
+//   4: minutes-remaining, e.g. "(resets 8m)"
 var rateLimitPatterns = []*regexp.Regexp{
-	// New format: "You've hit your limit · resets 10pm (Europe/London)"
-	regexp.MustCompile(`(?i)hit\s+your\s+limit.*resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)`),
-	// Original format: "limit reached ∙ resets 2pm"
-	regexp.MustCompile(`(?i)limit\s+reached.*resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)`),
-	// Minutes remaining format: "Limit reached (resets 8m)" or "resets 45m"
-	regexp.MustCompile(`(?i)(?:hit\s+your\s+limit|limit\s+reached).*resets?\s+(\d{1,3})m\b`),
+	regexp.MustCompile(`(?i)(?:hit\s+your\s+limit|limit\s+reached)[^\n]*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)\s*\(([A-Za-z_/+\-0-9]+)\)`),
+	regexp.MustCompile(`(?i)(?:hit\s+your\s+limit|limit\s+reached)[^\n]*?resets?\s+in\s+(?:(\d+)\s*h\s*)?(\d+)\s*m\b`),
+	regexp.MustCompile(`(?i)hit\s+your\s+limit.*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)`),
+	regexp.MustCompile(`(?i)limit\s+reached.*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)`),
+	regexp.MustCompile(`(?i)(?:hit\s+your\s+limit|limit\s+reached).*?resets?\s+(\d{1,3})m\b`),
 }
 
-// Fallback patterns - detect rate limit without capturing time.
-// Used when we can't parse a specific reset time. Patterns are specific to
-// avoid false positives. The menu pattern matters because Claude Code runs
-// in tmux alt-screen mode, which doesn't write to tmux scrollback — once the
-// "What do you want to do?" menu re-renders, the original "hit your limit"
-// line is gone from any capture-pane output. The menu strings are then the
-// only evidence we still have.
-var rateLimitFallbackPatterns = []*regexp.Regexp{
-	// "You've hit your limit" - Claude Code's primary message
-	regexp.MustCompile(`(?i)you['']ve\s+hit\s+your\s+limit`),
-	// "Limit reached" at word boundary (not "rate limit exceeded" or similar)
-	regexp.MustCompile(`(?i)\blimit\s+reached\b`),
-	// "rate limited" as a status indicator
-	regexp.MustCompile(`(?i)\brate\s+limited\b`),
-	// Blocking menu shown by Claude Code v2.1.x after rate limit
-	regexp.MustCompile(`(?i)stop\s+and\s+wait\s+for\s+limit\s+to\s+reset`),
+// Picker shown by Claude Code v2.1.x after hitting the rate limit:
+//
+//	What do you want to do?
+//	  ❯ 1. Upgrade your plan
+//	    2. Stop and wait for limit to reset
+//	  Enter to confirm · Esc to cancel
+var (
+	menuPattern       = regexp.MustCompile(`(?i)stop\s+and\s+wait\s+for\s+limit\s+to\s+reset`)
+	menuFooterPattern = regexp.MustCompile(`(?i)enter\s+to\s+confirm\s*[·•]\s*esc\s+to\s+cancel`)
+	// Live limit indicator — the ⚠ glyph that only appears in the status bar
+	// when Claude Code currently believes itself rate-limited. Chat-history
+	// quotes of "limit reached" omit this glyph.
+	liveIndicator = regexp.MustCompile(`(?i)⚠\s*(?:limit\s+reached|rate\s+limited)`)
+)
+
+// captureTail returns the last n lines of content for "is this rendered now"
+// checks (status bar + picker live near the bottom of the viewport).
+func captureTail(content string, n int) string {
+	lines := strings.Split(content, "\n")
+	start := len(lines) - n
+	if start < 0 {
+		start = 0
+	}
+	return strings.Join(lines[start:], "\n")
 }
 
-// CheckRateLimit checks pane content for rate limit messages
+// menuActive reports whether the picker is currently rendered (not merely
+// quoted in chat history). Requires both the menu row and the footer line in
+// the bottom of the capture.
+func menuActive(content string) bool {
+	tail := captureTail(content, 25)
+	return menuFooterPattern.MatchString(tail) && menuPattern.MatchString(tail)
+}
+
+// liveLimited reports whether the pane is *currently* rate-limited — the ⚠
+// indicator visible in the status bar, or the picker actively rendered.
+func liveLimited(content string) bool {
+	if menuActive(content) {
+		return true
+	}
+	return liveIndicator.MatchString(captureTail(content, 25))
+}
+
+// CheckRateLimit inspects pane content and returns the rate-limit state.
+// Rate-limit liveness is gated on the ⚠ status-bar indicator or an actively
+// rendered picker — chat-history quotes of past limit messages do NOT trigger.
 func CheckRateLimit(content string) RateLimitStatus {
-	// Try patterns that capture reset time first
+	if !liveLimited(content) {
+		return RateLimitStatus{}
+	}
+	menu := menuActive(content)
+
 	var match []string
-	var patternIdx int
+	patternIdx := -1
 	for i, pattern := range rateLimitPatterns {
 		match = pattern.FindStringSubmatch(content)
 		if match != nil {
@@ -59,31 +92,60 @@ func CheckRateLimit(content string) RateLimitStatus {
 		}
 	}
 
-	// If no time-capturing pattern matched, try fallback patterns
 	if match == nil {
-		for _, pattern := range rateLimitFallbackPatterns {
-			if pattern.MatchString(content) {
-				// Rate limited but couldn't parse time - return with empty ResetsAt
-				return RateLimitStatus{
-					IsLimited: true,
-					ResetsAt:  "", // Unknown reset time
-				}
-			}
-		}
-		return RateLimitStatus{IsLimited: false}
+		return RateLimitStatus{IsLimited: true, MenuShown: menu}
 	}
 
-	resetStr := match[1]
 	now := time.Now()
 
-	// Pattern index 2 is the minutes-remaining format (e.g., "8m" -> "8")
-	if patternIdx == 2 {
+	switch patternIdx {
+	case 0:
+		resetStr := match[1]
+		tzName := match[2]
+		loc, err := time.LoadLocation(tzName)
+		if err != nil {
+			loc = now.Location()
+		}
+		resetTime, perr := parseResetTimeInLocation(resetStr, loc)
+		if perr != nil {
+			return RateLimitStatus{IsLimited: true, ResetsAt: resetStr, MenuShown: menu}
+		}
+		resetTime = adjustForDayRollover(resetTime, now)
+		return RateLimitStatus{
+			IsLimited: true,
+			ResetsAt:  resetStr,
+			ResetTime: resetTime,
+			TimeUntil: resetTime.Sub(now),
+			MenuShown: menu,
+		}
+
+	case 1:
+		var hours int
+		if match[1] != "" {
+			hours, _ = strconv.Atoi(match[1])
+		}
+		minutes, _ := strconv.Atoi(match[2])
+		dur := time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute
+		resetTime := now.Add(dur)
+		var resetStr string
+		if hours > 0 {
+			resetStr = strconv.Itoa(hours) + "h " + strconv.Itoa(minutes) + "m"
+		} else {
+			resetStr = strconv.Itoa(minutes) + "m"
+		}
+		return RateLimitStatus{
+			IsLimited: true,
+			ResetsAt:  resetStr,
+			ResetTime: resetTime,
+			TimeUntil: dur,
+			MenuShown: menu,
+		}
+
+	case 4:
+		resetStr := match[1]
 		minutes, err := strconv.Atoi(resetStr)
 		if err != nil {
-			return RateLimitStatus{
-				IsLimited: true,
-				ResetsAt:  resetStr + "m",
-			}
+			return RateLimitStatus{IsLimited: true, ResetsAt: resetStr + "m", MenuShown: menu}
 		}
 		resetTime := now.Add(time.Duration(minutes) * time.Minute)
 		return RateLimitStatus{
@@ -91,94 +153,78 @@ func CheckRateLimit(content string) RateLimitStatus {
 			ResetsAt:  resetStr + "m",
 			ResetTime: resetTime,
 			TimeUntil: time.Duration(minutes) * time.Minute,
+			MenuShown: menu,
 		}
-	}
 
-	// Clock time format (e.g., "8pm", "10:30am")
-	resetTime, err := parseResetTime(resetStr)
-	if err != nil {
-		// Pattern matched but couldn't parse time - still rate limited
+	default:
+		resetStr := match[1]
+		resetTime, err := parseResetTimeInLocation(resetStr, now.Location())
+		if err != nil {
+			return RateLimitStatus{IsLimited: true, ResetsAt: resetStr, MenuShown: menu}
+		}
+		resetTime = adjustForDayRollover(resetTime, now)
 		return RateLimitStatus{
 			IsLimited: true,
 			ResetsAt:  resetStr,
+			ResetTime: resetTime,
+			TimeUntil: resetTime.Sub(now),
+			MenuShown: menu,
 		}
-	}
-
-	timeUntil := resetTime.Sub(now)
-
-	// If the time is more than 1 hour in the past, it's likely for tomorrow.
-	// But if it's within the last hour, keep it as-is so we can detect
-	// that the reset time has passed and trigger the continue action.
-	if timeUntil < -1*time.Hour {
-		resetTime = resetTime.Add(24 * time.Hour)
-		timeUntil = resetTime.Sub(now)
-	}
-
-	return RateLimitStatus{
-		IsLimited: true,
-		ResetsAt:  resetStr,
-		ResetTime: resetTime,
-		TimeUntil: timeUntil,
 	}
 }
 
-// parseResetTime parses a time string like "2pm" or "10:30am" into a time.Time for today
-func parseResetTime(s string) (time.Time, error) {
-	s = strings.ToLower(strings.TrimSpace(s))
-
-	now := time.Now()
-	loc := now.Location()
-
-	// Try parsing with minutes first: "10:30am"
-	formats := []string{
-		"3:04pm",
-		"3:04 pm",
-		"3pm",
-		"3 pm",
+// adjustForDayRollover bumps a reset time forward 24h when wall-clock time
+// has already passed today by more than one hour. Within the last hour it
+// stays as-is so HasReset() can trigger immediately.
+func adjustForDayRollover(t, now time.Time) time.Time {
+	if now.Sub(t) > time.Hour {
+		return t.Add(24 * time.Hour)
 	}
+	return t
+}
 
+// parseResetTimeInLocation parses "2pm" / "10:30am" / "3 pm" in the given location.
+// Returned time is in local time for direct comparison with time.Now().
+func parseResetTimeInLocation(s string, loc *time.Location) (time.Time, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	now := time.Now().In(loc)
+
+	formats := []string{"3:04pm", "3:04 pm", "3pm", "3 pm"}
 	for _, format := range formats {
 		t, err := time.ParseInLocation(format, s, loc)
 		if err == nil {
-			// Combine parsed time with today's date
-			return time.Date(now.Year(), now.Month(), now.Day(),
-				t.Hour(), t.Minute(), 0, 0, loc), nil
+			combined := time.Date(now.Year(), now.Month(), now.Day(),
+				t.Hour(), t.Minute(), 0, 0, loc)
+			return combined.In(time.Local), nil
 		}
 	}
 
-	// Manual parsing as fallback
 	isPM := strings.Contains(s, "pm")
-	s = strings.ReplaceAll(s, "am", "")
-	s = strings.ReplaceAll(s, "pm", "")
-	s = strings.TrimSpace(s)
+	clean := strings.ReplaceAll(strings.ReplaceAll(s, "am", ""), "pm", "")
+	clean = strings.TrimSpace(clean)
 
 	var hour, minute int
-	if strings.Contains(s, ":") {
-		parts := strings.Split(s, ":")
+	if strings.Contains(clean, ":") {
+		parts := strings.Split(clean, ":")
 		hour, _ = strconv.Atoi(parts[0])
 		minute, _ = strconv.Atoi(parts[1])
 	} else {
-		hour, _ = strconv.Atoi(s)
-		minute = 0
+		hour, _ = strconv.Atoi(clean)
 	}
-
-	// Convert to 24-hour format
 	if isPM && hour != 12 {
 		hour += 12
 	} else if !isPM && hour == 12 {
 		hour = 0
 	}
 
-	return time.Date(now.Year(), now.Month(), now.Day(),
-		hour, minute, 0, 0, loc), nil
+	combined := time.Date(now.Year(), now.Month(), now.Day(),
+		hour, minute, 0, 0, loc)
+	return combined.In(time.Local), nil
 }
 
-// HasReset checks if the rate limit has reset (time has passed)
+// HasReset reports whether the parsed reset time has elapsed.
 func (r RateLimitStatus) HasReset() bool {
-	if !r.IsLimited {
-		return false
-	}
-	if r.ResetTime.IsZero() {
+	if !r.IsLimited || r.ResetTime.IsZero() {
 		return false
 	}
 	return time.Now().After(r.ResetTime)
