@@ -154,8 +154,12 @@ func (s *state) processPane(p *tmux.Pane, testPattern string) {
 		p.LimitedSince = now
 		p.ProbeAt = now.Add(probeBackoff(0))
 		p.ProbeCount = 0
-		s.logger.Printf("INFO pane=%s rate-limited menu=%v resets=%q first-probe-at=+%s",
-			p.Location(), status.MenuShown, status.ResetsAt, probeBackoff(0))
+		mode := "wait-for-captured-reset"
+		if status.ResetTime.IsZero() {
+			mode = fmt.Sprintf("probe-from=+%s", probeBackoff(0))
+		}
+		s.logger.Printf("INFO pane=%s rate-limited menu=%v resets=%q %s",
+			p.Location(), status.MenuShown, status.ResetsAt, mode)
 	}
 
 	if wasLimited && !status.IsLimited {
@@ -181,12 +185,19 @@ func (s *state) processPane(p *tmux.Pane, testPattern string) {
 			return
 		}
 
-		if !p.RateLimitTime.IsZero() && !p.ContinueSent && now.After(p.RateLimitTime) {
-			s.sendContinue(p, "reset-elapsed")
-			p.ContinueSent = true
+		if !p.RateLimitTime.IsZero() {
+			// Captured reset time exists — trust it and wait. Probing here
+			// is wasted dispatch (claude already knows when the limit lifts).
+			if !p.ContinueSent && now.After(p.RateLimitTime) {
+				s.sendContinue(p, "reset-elapsed")
+				p.ContinueSent = true
+			}
 			return
 		}
 
+		// No captured reset time — probe with backoff to discover when the
+		// limit lifts. Gated on probeMinIdle so freshly-limited panes don't
+		// get interrupted while the user might still be composing.
 		if !p.ContinueSent && now.After(p.ProbeAt) && now.Sub(p.LimitedSince) >= probeMinIdle {
 			s.sendContinue(p, fmt.Sprintf("probe-%d", p.ProbeCount))
 			// Don't bump ProbeCount yet; bump only if next tick shows menu
