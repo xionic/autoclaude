@@ -39,10 +39,11 @@ var rateLimitPatterns = []*regexp.Regexp{
 var (
 	menuPattern       = regexp.MustCompile(`(?i)stop\s+and\s+wait\s+for\s+limit\s+to\s+reset`)
 	menuFooterPattern = regexp.MustCompile(`(?i)enter\s+to\s+confirm\s*[·•]\s*esc\s+to\s+cancel`)
-	// Live limit indicator — the ⚠ glyph that only appears in the status bar
-	// when Claude Code currently believes itself rate-limited. Chat-history
-	// quotes of "limit reached" omit this glyph.
-	liveIndicator = regexp.MustCompile(`(?i)⚠\s*(?:limit\s+reached|rate\s+limited)`)
+	// Live limit indicator — the status-bar line Claude Code paints when it
+	// currently believes itself rate-limited. Requires Context + Usage + ⚠
+	// on the same line so the pattern can't match diff text, test fixtures,
+	// or chat history that merely quotes "limit reached".
+	liveIndicator = regexp.MustCompile(`(?i)Context[^\n]*Usage[^\n]*⚠\s*(?:limit\s+reached|rate\s+limited)`)
 )
 
 // captureTail returns the last n lines of content for "is this rendered now"

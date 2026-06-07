@@ -5,5 +5,4 @@
 
 > /rate-limit-options
 
-[Opus 4.7] │ Context 25%
-⚠ Limit reached · resets 10pm
+[Opus 4.7] │ Context 25% │ Usage ⚠ Limit reached · resets 10pm

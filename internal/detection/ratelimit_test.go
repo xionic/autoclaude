@@ -58,7 +58,7 @@ func TestCheckRateLimit_NoMatch(t *testing.T) {
 func TestCheckRateLimit_TimeFormats(t *testing.T) {
 	// Every case must include the live ⚠ indicator — otherwise detection
 	// (correctly) treats it as chat-history quotation and skips.
-	live := "\n⚠ Limit reached"
+	live := "\nContext 25% │ Usage ⚠ Limit reached"
 	cases := []struct {
 		name     string
 		content  string
@@ -91,7 +91,7 @@ func TestCheckRateLimit_TimeFormats(t *testing.T) {
 		},
 		{
 			name:     "minutes remaining format",
-			content:  "⚠ Limit reached (resets 8m)",
+			content:  "Context 5% │ Usage ⚠ Limit reached (resets 8m)",
 			wantTime: "8m",
 		},
 		{
@@ -101,7 +101,7 @@ func TestCheckRateLimit_TimeFormats(t *testing.T) {
 		},
 		{
 			name:     "minutes remaining triple digit",
-			content:  "⚠ Limit reached (resets 120m)",
+			content:  "Context 50% │ Usage ⚠ Limit reached (resets 120m)",
 			wantTime: "120m",
 		},
 	}
@@ -120,7 +120,7 @@ func TestCheckRateLimit_TimeFormats(t *testing.T) {
 }
 
 func TestCheckRateLimit_MinutesFormat(t *testing.T) {
-	status := CheckRateLimit("⚠ Limit reached (resets 30m)")
+	status := CheckRateLimit("Context 50% │ Usage ⚠ Limit reached (resets 30m)")
 
 	if !status.IsLimited {
 		t.Error("expected IsLimited to be true")
@@ -144,12 +144,12 @@ func TestCheckRateLimit_FallbackNoTime_LiveIndicatorOnly(t *testing.T) {
 		content string
 	}{
 		{
-			name:    "live ⚠ Limit reached without parseable time",
-			content: "[Opus] ⚠ Limit reached (resets in 2 hours)",
+			name:    "live status-bar line without parseable time",
+			content: "[Opus] │ Context 5% │ Usage ⚠ Limit reached (resets in 2 hours)",
 		},
 		{
 			name:    "live ⚠ Rate limited indicator",
-			content: "Context 50% │ ⚠ Rate limited",
+			content: "Context 50% │ Usage ⚠ Rate limited",
 		},
 	}
 
@@ -219,13 +219,13 @@ func TestCheckRateLimit_StatusBarRelative(t *testing.T) {
 		},
 		{
 			name:        "minutes only",
-			content:     "Usage ⚠ Limit reached (resets in 47m)",
+			content:     "[Opus] │ Context 8% │ Usage ⚠ Limit reached (resets in 47m)",
 			wantResets:  "47m",
 			wantApproxD: 47 * time.Minute,
 		},
 		{
 			name:        "alt form 'you've hit your limit'",
-			content:     "You've hit your limit · resets in 2h 5m\n⚠ Limit reached",
+			content:     "You've hit your limit · resets in 2h 5m\nContext 25% │ Usage ⚠ Limit reached",
 			wantResets:  "2h 5m",
 			wantApproxD: 2*time.Hour + 5*time.Minute,
 		},
@@ -260,7 +260,7 @@ func TestCheckRateLimit_StatusBarBelowLimit_NoFalsePositive(t *testing.T) {
 }
 
 func TestCheckRateLimit_TZAware(t *testing.T) {
-	content := "❯ clear those stashes\n  ⎿  You've hit your limit · resets 7:10pm (America/Sao_Paulo)\n⚠ Limit reached"
+	content := "❯ clear those stashes\n  ⎿  You've hit your limit · resets 7:10pm (America/Sao_Paulo)\nContext 25% │ Usage ⚠ Limit reached"
 	status := CheckRateLimit(content)
 	if !status.IsLimited {
 		t.Fatal("expected IsLimited=true")

@@ -1,2 +1,2 @@
 limit reached ∙ resets 2pm
-[Opus] │ ⚠ Limit reached · resets 2pm
+[Opus] │ Context 5% │ Usage ⚠ Limit reached · resets 2pm
