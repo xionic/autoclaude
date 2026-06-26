@@ -67,7 +67,13 @@ func ListPanes(windowID string) (*Layout, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	const sep = "\x1f"
+	// tmux >= 3.4 (verified on 3.5a) escapes control bytes in -F output: a raw
+	// 0x1f separator comes back as the literal text "\037", so splitting on the
+	// byte yields a single field and every pane fails to parse. Use a printable,
+	// non-whitespace sentinel that tmux passes through verbatim (and that
+	// TrimSpace won't nibble). pane_title — the only free-form field — stays
+	// last so the rejoin logic below absorbs any stray sentinel inside it.
+	const sep = "@@<AC-SEP>@@"
 	format := strings.Join([]string{
 		"#{pane_id}",
 		"#{session_name}",
@@ -121,6 +127,13 @@ func parsePaneLine(line, sep string) (*Pane, error) {
 	fields := strings.Split(line, sep)
 	if len(fields) < 9 {
 		return nil, fmt.Errorf("expected at least 9 fields, got %d", len(fields))
+	}
+
+	// If we have more than expected fields, the separator leaked into a field (like pane_title)
+	// Rejoin extra fields back into the last field
+	if len(fields) > 10 {
+		fields[9] = strings.Join(fields[9:], sep)
+		fields = fields[:10]
 	}
 
 	left, err := strconv.Atoi(fields[5])

@@ -24,7 +24,7 @@ var (
 
 	// Rate limit messages - definitive proof it's Claude Code
 	rateLimitMsgPattern    = regexp.MustCompile(`(?i)limit\s+reached`)
-	rateLimitMsgPatternAlt = regexp.MustCompile(`(?i)hit\s+your\s+limit`)
+	rateLimitMsgPatternAlt = regexp.MustCompile(`(?i)hit\s+your\s+(?:session\s+)?limit`)
 	// Post-limit menu shown by Claude Code v2.1.x — definitive when the
 	// original "hit your limit" line has scrolled out of the alt-screen.
 	rateLimitMenuPattern = regexp.MustCompile(`(?i)stop\s+and\s+wait\s+for\s+limit\s+to\s+reset`)

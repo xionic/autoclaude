@@ -18,16 +18,17 @@ type RateLimitStatus struct {
 
 // Reset-time patterns, ordered by specificity.
 //   0: TZ-aware absolute, e.g. "You've hit your limit · resets 7:10pm (America/Sao_Paulo)"
+//      Also matches "session limit" variant: "hit your session limit · resets 6:20pm (Europe/London)"
 //   1: status-line relative, e.g. "Usage ⚠ Limit reached (resets in 3h 10m)" / "(resets in 47m)"
 //   2: bare absolute, e.g. "You've hit your limit · resets 10pm"
 //   3: bare absolute, "limit reached" prefix
 //   4: minutes-remaining, e.g. "(resets 8m)"
 var rateLimitPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(?:hit\s+your\s+limit|limit\s+reached)[^\n]*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)\s*\(([A-Za-z_/+\-0-9]+)\)`),
-	regexp.MustCompile(`(?i)(?:hit\s+your\s+limit|limit\s+reached)[^\n]*?resets?\s+in\s+(?:(\d+)\s*h\s*)?(\d+)\s*m\b`),
-	regexp.MustCompile(`(?i)hit\s+your\s+limit.*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)`),
+	regexp.MustCompile(`(?i)(?:hit\s+your\s+(?:session\s+)?limit|limit\s+reached)[^\n]*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)\s*\(([A-Za-z_/+\-0-9]+)\)`),
+	regexp.MustCompile(`(?i)(?:hit\s+your\s+(?:session\s+)?limit|limit\s+reached)[^\n]*?resets?\s+in\s+(?:(\d+)\s*h\s*)?(\d+)\s*m\b`),
+	regexp.MustCompile(`(?i)hit\s+your\s+(?:session\s+)?limit.*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)`),
 	regexp.MustCompile(`(?i)limit\s+reached.*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)`),
-	regexp.MustCompile(`(?i)(?:hit\s+your\s+limit|limit\s+reached).*?resets?\s+(\d{1,3})m\b`),
+	regexp.MustCompile(`(?i)(?:hit\s+your\s+(?:session\s+)?limit|limit\s+reached).*?resets?\s+(\d{1,3})m\b`),
 }
 
 // Picker shown by Claude Code v2.1.x after hitting the rate limit:
@@ -39,39 +40,74 @@ var rateLimitPatterns = []*regexp.Regexp{
 var (
 	menuPattern       = regexp.MustCompile(`(?i)stop\s+and\s+wait\s+for\s+limit\s+to\s+reset`)
 	menuFooterPattern = regexp.MustCompile(`(?i)enter\s+to\s+confirm\s*[·•]\s*esc\s+to\s+cancel`)
-	// Live limit indicator — the status-bar line Claude Code paints when it
-	// currently believes itself rate-limited. Requires Context + Usage + ⚠
-	// on the same line so the pattern can't match diff text, test fixtures,
-	// or chat history that merely quotes "limit reached".
-	liveIndicator = regexp.MustCompile(`(?i)Context[^\n]*Usage[^\n]*⚠\s*(?:limit\s+reached|rate\s+limited)`)
+	// menuHeaderPattern is the prompt the picker prints above its options. Real
+	// Claude Code renders this header but does NOT always render the
+	// "Enter to confirm · Esc to cancel" footer (see the three-option form in
+	// the example fixture), so the header is an alternate liveness signal.
+	menuHeaderPattern = regexp.MustCompile(`(?i)what\s+do\s+you\s+want\s+to\s+do\?`)
+	// Live limit indicator — the status-bar glyph Claude Code paints when it
+	// currently believes itself rate-limited. The ⚠ warning sigil immediately
+	// before "limit reached"/"rate limited" is what distinguishes the live
+	// status bar from chat-history prose (which quotes the words but never the
+	// ⚠ sigil). Earlier this also demanded "Context … Usage" on the same line,
+	// but real Claude Code paints the ⚠ line on its own (e.g.
+	// "⚠ Limit reached (resets 8m)"), so that extra framing matched the
+	// hand-written test fixtures yet never matched a real pane — and detection
+	// silently never fired.
+	liveIndicator = regexp.MustCompile(`(?i)⚠\s*(?:limit\s+reached|rate\s+limited)`)
+
+	// sessionLimitIndicator catches the inline message Claude Code emits when
+	// the *subscription session limit* (rather than the API rate limit) is hit.
+	// Unlike the ⚠ status-bar line, this appears as a tool-result bullet in the
+	// chat content: "⎿  You've hit your session limit · resets 6:20pm …".
+	// The phrase "hit your session limit" is unique enough to use as a liveness
+	// signal — it doesn't appear in generic conversation history.
+	sessionLimitIndicator = regexp.MustCompile(`(?i)hit\s+your\s+session\s+limit`)
 )
 
 // captureTail returns the last n lines of content for "is this rendered now"
 // checks (status bar + picker live near the bottom of the viewport).
+//
+// Trailing blank lines are dropped first: `tmux capture-pane -p` pads its
+// output to the full pane height, so a status bar that doesn't sit on the very
+// bottom row arrives followed by blank padding. Without trimming, that padding
+// can shove the live indicator out of the n-line window and detection silently
+// misses a genuinely rate-limited pane.
 func captureTail(content string, n int) string {
 	lines := strings.Split(content, "\n")
-	start := len(lines) - n
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	start := end - n
 	if start < 0 {
 		start = 0
 	}
-	return strings.Join(lines[start:], "\n")
+	return strings.Join(lines[start:end], "\n")
 }
 
 // menuActive reports whether the picker is currently rendered (not merely
-// quoted in chat history). Requires both the menu row and the footer line in
-// the bottom of the capture.
+// quoted in chat history). Requires the "Stop and wait" row plus picker framing
+// — either the "Enter to confirm · Esc to cancel" footer or the
+// "What do you want to do?" header — in the bottom of the capture. A lone
+// quoted "stop and wait" line (with neither header nor footer) does not count.
 func menuActive(content string) bool {
 	tail := captureTail(content, 25)
-	return menuFooterPattern.MatchString(tail) && menuPattern.MatchString(tail)
+	if !menuPattern.MatchString(tail) {
+		return false
+	}
+	return menuFooterPattern.MatchString(tail) || menuHeaderPattern.MatchString(tail)
 }
 
 // liveLimited reports whether the pane is *currently* rate-limited — the ⚠
-// indicator visible in the status bar, or the picker actively rendered.
+// indicator visible in the status bar, the picker actively rendered, or the
+// inline "session limit" message that appears in the chat body.
 func liveLimited(content string) bool {
 	if menuActive(content) {
 		return true
 	}
-	return liveIndicator.MatchString(captureTail(content, 25))
+	tail := captureTail(content, 25)
+	return liveIndicator.MatchString(tail) || sessionLimitIndicator.MatchString(tail)
 }
 
 // CheckRateLimit inspects pane content and returns the rate-limit state.
